@@ -358,6 +358,8 @@ struct LoadOpConversion : public ConvertOpToLLVMPattern<triton::LoadOp>,
 
 struct StoreOpConversion : public ConvertOpToLLVMPattern<triton::StoreOp>,
                            public LoadStoreConversionBase {
+  using ConvertOpToLLVMPattern<triton::StoreOp>::ConvertOpToLLVMPattern;
+
   StoreOpConversion(LLVMTypeConverter &converter,
                     const NVIDIA::TargetInfo &targetInfo,
                     ModuleAxisInfoAnalysis &axisAnalysisPass,
@@ -370,6 +372,7 @@ struct StoreOpConversion : public ConvertOpToLLVMPattern<triton::StoreOp>,
                   ConversionPatternRewriter &rewriter) const override {
     Value ptr = op.getPtr();
     Value value = op.getValue();
+    Value mask = op.getMask();
 
     Value llPtr = adaptor.getPtr();
     Value llMask = adaptor.getMask();
@@ -390,10 +393,8 @@ struct StoreOpConversion : public ConvertOpToLLVMPattern<triton::StoreOp>,
     assert(ptrElems.size() == valueElems.size());
 
     // Determine the vectorization size
-    unsigned vecOrig = vec;
     SmallVector<Value> maskElems;
     if (llMask) {
-      Value mask = op.getMask();
       maskElems = unpackLLElements(loc, llMask, rewriter);
       assert(valueElems.size() == maskElems.size());
 
@@ -401,23 +402,16 @@ struct StoreOpConversion : public ConvertOpToLLVMPattern<triton::StoreOp>,
       vec = std::min(vec, maskAlign);
     }
 
-    if (vec == 1 && elemsPerThread > 1) {
-      int mask = !llMask ? -1 : getMaskAlignment(op.getMask());
-      op->emitRemark() << "Warning: vectorization fails vec = " << vec
-                       << " origin vec = " << vecOrig
-                       << " elemsPerThread = " << elemsPerThread << " mask is "
-                       << mask << "\n";
-    }
-
-    Value mask = redundantDataMask(valueTy, rewriter, loc, targetInfo);
     const size_t dtsize =
         std::max<int>(1, valueElemTy.getIntOrFloatBitWidth() / 8);
     const size_t valueElemNBits = dtsize * 8;
 
     const int numVecs = elemsPerThread / vec;
+    Value rDataMask = redundantDataMask(valueTy, rewriter, loc, targetInfo);
     for (size_t vecStart = 0; vecStart < elemsPerThread; vecStart += vec) {
-      // TODO: optimization when ptr is AddPtr with constant offset
       size_t in_off = 0;
+      Value pred = mask ? and_(maskElems[vecStart], rDataMask) : rDataMask;
+      auto vecTy = LLVM::getFixedVectorType(valueElemTy, vec);
 
       const size_t maxWordWidth = std::max<size_t>(32, valueElemNBits);
       const size_t totalWidth = valueElemNBits * vec;
@@ -426,65 +420,24 @@ struct StoreOpConversion : public ConvertOpToLLVMPattern<triton::StoreOp>,
       const size_t wordNElems = width / valueElemNBits;
       assert(wordNElems * nWords * numVecs == elemsPerThread);
 
-      // TODO(Superjomn) Add cache policy fields to StoreOp.
-      // TODO(Superjomn) Deal with cache policy here.
-
       Type valArgTy = IntegerType::get(ctx, width);
       auto wordTy = vec_ty(valueElemTy, wordNElems);
 
       SmallVector<std::pair<Value, std::string>> asmArgs;
-      for (size_t wordIdx = 0; wordIdx < nWords; ++wordIdx) {
-        // llWord is a width-len composition
-        Value llWord = undef(wordTy);
-        // Insert each value element to the composition
-        for (size_t elemIdx = 0; elemIdx < wordNElems; ++elemIdx) {
-          const size_t elemOffset = vecStart + wordIdx * wordNElems + elemIdx;
-          assert(elemOffset < valueElems.size());
-          Value elem = valueElems[elemOffset];
-          if (elem.getType().isInteger(1))
-            elem = sext(i8_ty, elem);
-          elem = bitcast(elem, valueElemTy);
+      Value elem = valueElems[vecStart];
+      Value ptr = addrspacecast(ptr_ty(getContext()), ptrElems[vecStart]);
 
-          llWord = insert_element(wordTy, llWord, elem, i32_val(elemIdx));
-        }
-        llWord = bitcast(llWord, valArgTy);
-        std::string constraint =
-            (width == 64) ? "l" : ((width == 32) ? "r" : "c");
-        asmArgs.emplace_back(llWord, constraint);
+      // Create the store val
+      Value storeVal = undef(vecTy);
+      for (size_t s = 0; s < vec; ++s) {
+        Value otherElem = valueElems[vecStart + s];
+        Value indexVal = createIndexAttrConstant(
+            rewriter, loc, this->getTypeConverter()->getIndexType(), s);
+        storeVal = insert_element(vecTy, storeVal, otherElem, indexVal);
       }
-
-      // Prepare the PTX inline asm.
-      PTXBuilder ptxBuilder;
-      auto *asmArgList = ptxBuilder.newListOperand(asmArgs);
-
-      Value maskVal = llMask ? and_(mask, maskElems[vecStart]) : mask;
-
-      auto *asmAddr =
-          ptxBuilder.newAddrOperand(ptrElems[vecStart], "l", in_off);
-
-      auto &ptxStoreInstr =
-          ptxBuilder.create<>("st")
-              ->global()
-              .o("wb", op.getCache() == triton::CacheModifier::WB)
-              .o("cg", op.getCache() == triton::CacheModifier::CG)
-              .o("cs", op.getCache() == triton::CacheModifier::CS)
-              .o("wt", op.getCache() == triton::CacheModifier::WT)
-              .o("L1::evict_first",
-                 op.getEvict() == triton::EvictionPolicy::EVICT_FIRST)
-              .o("L1::evict_last",
-                 op.getEvict() == triton::EvictionPolicy::EVICT_LAST)
-              .v(nWords)
-              .b(width);
-      ptxStoreInstr(asmAddr, asmArgList).predicate(maskVal, "b");
-
-      Type boolTy = getTypeConverter()->convertType(rewriter.getIntegerType(1));
-      llvm::SmallVector<Type> argTys({boolTy, ptr.getType()});
-      argTys.insert(argTys.end(), nWords, valArgTy);
-
-      auto asmReturnTy = void_ty(ctx);
-
-      ptxBuilder.launch(rewriter, loc, asmReturnTy);
-    }
+      // ::mlir::LLVM::StoreOp(rewriter, loc, ptr, storeVal, pred, cacheMod);
+      rewriter.create<::mlir::LLVM::StoreOp>(loc, storeVal, ptr);
+    } // end vec
     rewriter.eraseOp(op);
     return success();
   }
