@@ -537,7 +537,7 @@ Value TargetInfo::shuffleIdx(RewriterBase &rewriter, Location loc, Value val,
 
 Value TargetInfo::programId(RewriterBase &rewriter, Location loc,
                             ModuleOp moduleOp, int axis) const {
-  return LLVM::NVIDIA::llGetPid(loc, rewriter, moduleOp, axis);
+  return LLVM::NVIDIA::llGetPidByNVVM(loc, rewriter, moduleOp, axis);
 }
 bool TargetInfo::warpReduce(RewriterBase &rewriter, Location loc,
                             SmallVector<Value> &acc, triton::ReduceOp op,

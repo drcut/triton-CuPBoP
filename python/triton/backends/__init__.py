@@ -18,6 +18,10 @@ def _find_concrete_subclasses(module, base_class):
     for attr_name in dir(module):
         attr = getattr(module, attr_name)
         if isinstance(attr, type) and issubclass(attr, base_class) and not inspect.isabstract(attr):
+            if attr_name == 'CUDABackend' and os.environ.get('TRITON_CUPBOP', '0') == '1':
+                continue
+            elif attr_name == 'CUDACuPBoPBackend' and os.environ.get('TRITON_CUPBOP', '0') == '0':
+                continue
             ret.append(attr)
     if len(ret) == 0:
         raise RuntimeError(f"Found 0 concrete subclasses of {base_class} in {module}: {ret}")

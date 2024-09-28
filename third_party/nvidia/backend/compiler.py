@@ -377,3 +377,251 @@ class CUDABackend(BaseBackend):
     def hash(self):
         version = get_ptxas_version()
         return f'{version}-{self.capability}'
+
+
+class CUDACuPBoPBackend(BaseBackend):
+
+    @staticmethod
+    def supports_target(target: GPUTarget):
+        return target.backend == 'cuda'
+
+    def __init__(self, target: GPUTarget) -> None:
+        super().__init__(target)
+        self.capability = target.arch
+        assert isinstance(self.capability, int)
+        self.binary_ext = "object" # .o for CPU programs
+
+    def parse_options(self, opts) -> Any:
+        args = {k: opts[k]
+                for k in CUDAOptions.__dataclass_fields__.keys() if k in opts}
+
+        if "enable_fp_fusion" not in args:
+            args["enable_fp_fusion"] = os.getenv(
+                "TRITON_DEFAULT_FP_FUSION", "1") == "1"
+        args["max_num_imprecise_acc_default"] = 2**30 if self.capability == 90 else 0
+        return CUDAOptions(**args)
+
+    def pack_metadata(self, metadata):
+        return (
+            metadata.num_warps,
+            metadata.num_ctas,
+            metadata.shared,
+            metadata.cluster_dims[0],
+            metadata.cluster_dims[1],
+            metadata.cluster_dims[2],
+        )
+
+    def get_codegen_implementation(self):
+        import triton.language.extra.cuda as cuda
+        codegen_fns = {
+            "convert_custom_types":
+            cuda.convert_custom_float8_sm80 if self.capability >= 80 else cuda.convert_custom_float8_sm70,
+            "min_dot_size": min_dot_size(self.target)
+        }
+        return codegen_fns
+
+    def get_module_map(self) -> Dict[str, ModuleType]:
+        from triton.language.extra.cuda import libdevice
+        return {"triton.language.extra.libdevice": libdevice}
+
+    def load_dialects(self, ctx):
+        nvidia.load_dialects(ctx)
+
+    @staticmethod
+    def make_ttir(mod, metadata, opt):
+        pm = ir.pass_manager(mod.context)
+        pm.enable_debug()
+        passes.common.add_inliner(pm)
+        passes.ttir.add_rewrite_tensor_pointer(pm)
+        passes.ttir.add_combine(pm)
+        passes.common.add_canonicalizer(pm)
+        passes.ttir.add_reorder_broadcast(pm)
+        passes.common.add_cse(pm)
+        passes.common.add_licm(pm)
+        passes.common.add_symbol_dce(pm)
+        passes.ttir.add_loop_unroll(pm)
+        pm.run(mod)
+        return mod
+
+    @staticmethod
+    def make_ttgir(mod, metadata, opt, capability):
+        cluster_info = nvidia.ClusterInfo()
+        if opt.cluster_dims is not None:
+            cluster_info.clusterDimX = opt.cluster_dims[0]
+            cluster_info.clusterDimY = opt.cluster_dims[1]
+            cluster_info.clusterDimZ = opt.cluster_dims[2]
+        # Set up Diagnostic
+        if os.environ.get("MLIR_ENABLE_REMARK", "0") == "1":
+            srcMgr = llvm.source_mgr()
+            diag = ir.source_mgr_diag(srcMgr, mod.context)
+            mod.context.printOpOnDiagnostic(True)
+        # TTIR -> TTGIR
+        pm = ir.pass_manager(mod.context)
+        pm.enable_debug()
+        passes.ttir.add_convert_to_ttgpuir(
+            pm, f"cuda:{capability}", opt.num_warps, 32, opt.num_ctas)
+        # optimize TTGIR
+        passes.ttgpuir.add_coalesce(pm)
+        if capability // 10 >= 8:
+            passes.ttgpuir.add_f32_dot_tc(pm)
+        # TODO(Qingyi): Move PlanCTAPass to the front of CoalescePass
+        nvidia.passes.ttnvgpuir.add_plan_cta(pm, cluster_info)
+        passes.ttgpuir.add_remove_layout_conversions(pm)
+        passes.ttgpuir.add_optimize_thread_locality(pm)
+        passes.ttgpuir.add_accelerate_matmul(pm)
+        passes.ttgpuir.add_remove_layout_conversions(pm)
+        passes.ttgpuir.add_optimize_dot_operands(pm, capability >= 80)
+        passes.common.add_cse(pm)
+        if capability // 10 >= 8:
+            passes.ttgpuir.add_optimize_accumulator_init(pm)
+            passes.ttgpuir.add_combine_tensor_select_and_if(pm)
+            passes.ttgpuir.add_pipeline(pm, opt.num_stages)
+        passes.ttgpuir.add_prefetch(pm)
+        passes.ttgpuir.add_optimize_dot_operands(pm, capability >= 80)
+        passes.ttgpuir.add_remove_layout_conversions(pm)
+        passes.ttgpuir.add_reduce_data_duplication(pm)
+        passes.ttgpuir.add_reorder_instructions(pm)
+        passes.common.add_cse(pm)
+        passes.common.add_symbol_dce(pm)
+        if capability // 10 >= 9:
+            nvidia.passes.ttnvgpuir.add_fence_insertion(pm)
+            nvidia.passes.ttnvgpuir.add_tma_lowering(pm)
+        passes.common.add_canonicalizer(pm)
+        pm.run(mod)
+        metadata["cluster_dims"] = (
+            cluster_info.clusterDimX, cluster_info.clusterDimY, cluster_info.clusterDimZ)
+        return mod
+
+    @staticmethod
+    def make_llir(src, metadata, options, capability):
+        # warp-specialization mutates num_warps
+        num_warp_groups = src.get_int_attr(
+            "triton_gpu.num-warp-groups-per-cta")
+        if num_warp_groups is not None:
+            metadata["num_warps"] *= num_warp_groups
+        mod = src
+        # TritonGPU -> LLVM-IR (MLIR)
+        pm = ir.pass_manager(mod.context)
+        pm.enable_debug()
+        # Set up Diagnostic
+        if os.environ.get("MLIR_ENABLE_REMARK", "0") == "1":
+            srcMgr = llvm.source_mgr()
+            diag = ir.source_mgr_diag(srcMgr, mod.context)
+            mod.context.printOpOnDiagnostic(True)
+        nvidia.passes.ttgpuir.add_decompose_unsupported_conversions(pm)
+        passes.ttgpuir.add_combine_tensor_select_and_if(pm)
+        passes.convert.add_scf_to_cf(pm)
+        passes.convert.add_index_to_llvmir(pm)
+        passes.ttgpuir.add_allocate_shared_memory(pm)
+        nvidia.passes.ttgpuir.add_to_llvmir(pm, capability)
+        nvidia.passes.ttnvgpuir.add_nvgpu_to_llvm(pm)
+        passes.convert.add_arith_to_llvmir(pm)
+        passes.common.add_canonicalizer(pm)
+        passes.common.add_cse(pm)
+        passes.common.add_symbol_dce(pm)
+        if os.environ.get("TRITON_DISABLE_LINE_INFO", "0") == "0":
+            passes.llvmir.add_di_scope(pm)
+        pm.run(mod)
+        # LLVM-IR (MLIR) -> LLVM-IR (LLVM)
+        llvm.init_targets()
+        context = llvm.context()
+
+        llvm_mod = llvm.to_module(mod, context)
+        proc = 'sm_90a' if capability == 90 else f'sm_{capability}'
+        features = get_features(options)
+        triple = 'nvptx64-nvidia-cuda'
+        llvm.attach_datalayout(llvm_mod, triple, proc, features)
+        nvidia.set_nvvm_reflect_ftz(llvm_mod)
+
+        # Set maxnreg on all kernels, if it was provided.
+        if options.maxnreg is not None:
+            for k in llvm_mod.get_functions():
+                if not k.is_declaration() and k.is_external_linkage():
+                    k.set_nvvm_maxnreg(options.maxnreg)
+
+        if options.extern_libs:
+            paths = [path for (name, path) in options.extern_libs]
+            llvm.link_extern_libs(llvm_mod, paths)
+
+        llvm.optimize_module(llvm_mod, llvm.OPTIMIZE_O3)
+
+        # Get some metadata
+        metadata["shared"] = src.get_int_attr("triton_gpu.shared")
+        ret = str(llvm_mod)
+        del llvm_mod
+        del context
+        return ret
+
+    @staticmethod
+    def make_asm(src, metadata, opt, capability):
+        triple = 'x86_64-unknown-linux-gnu'
+        proc = ''
+        features = get_features(opt)
+        ret = llvm.translate_to_asm(src, triple, proc, features, [], opt.enable_fp_fusion, False)
+        # Find kernel names (there should only be one)
+        names = re.findall(r".visible .entry ([a-zA-Z_][a-zA-Z0-9_]*)", ret)
+        assert len(names) == 1
+        metadata["name"] = names[0]
+        if os.environ.get("NVPTX_ENABLE_DUMP", "0") == "1":
+            print("// -----// CuPBoP CPU Assembly Dump //----- //")
+            print(ret)
+        return ret
+
+    @staticmethod
+    def make_obj(src, metadata, opt, capability):
+        clang, _ = _path_to_binary("clang")
+        with tempfile.NamedTemporaryFile(delete=False, mode='w', suffix='.o') as fsrc, \
+                tempfile.NamedTemporaryFile(delete=False, mode='r', suffix='.log') as flog:
+            fsrc.write(src)
+            fsrc.flush()
+            fbin = fsrc.name + '.o'
+
+            line_info = [] if os.environ.get(
+                'TRITON_DISABLE_LINE_INFO') else ['-lineinfo']
+            fmad = [] if opt.enable_fp_fusion else ['--fmad=false']
+            opt_level = [
+                '--opt-level', '0'] if os.environ.get("DISABLE_PTXAS_OPT", "0") == "1" else []
+            clang_cmd = [
+                clang, *line_info, *fmad, '-v', *
+                opt_level, fsrc.name, '-o', fbin
+            ]
+            try:
+                subprocess.run(clang_cmd, check=True,
+                               close_fds=False, stderr=flog)
+                if os.path.exists(fsrc.name):
+                    os.remove(fsrc.name)
+                if os.path.exists(flog.name):
+                    os.remove(flog.name)
+            except subprocess.CalledProcessError as e:
+                with open(flog.name) as log_file:
+                    log = log_file.read()
+                if os.path.exists(flog.name):
+                    os.remove(flog.name)
+                error = f'`clang` failed with error code {e.returncode}'
+
+                raise RuntimeError(f'{error}\n'
+                                   f'`ptxas` stderr:\n{log}\n'
+                                   f'Repro command: {clang_cmd}\n')
+
+            with open(fbin, 'rb') as f:
+                cpu_bin = f.read()
+            if os.path.exists(fbin):
+                os.remove(fbin)
+        return cpu_bin
+
+    def add_stages(self, stages, options):
+        stages["ttir"] = lambda src, metadata: self.make_ttir(
+            src, metadata, options)
+        stages["ttgir"] = lambda src, metadata: self.make_ttgir(
+            src, metadata, options, self.capability)
+        stages["llir"] = lambda src, metadata: self.make_llir(
+            src, metadata, options, self.capability)
+        stages["asm"] = lambda src, metadata: self.make_asm(
+            src, metadata, options, self.capability)
+        stages["obj"] = lambda src, metadata: self.make_obj(
+            src, metadata, options, self.capability)
+
+    @functools.lru_cache()
+    def hash(self):
+        version = get_ptxas_version()
+        return f'{version}-{self.capability}'

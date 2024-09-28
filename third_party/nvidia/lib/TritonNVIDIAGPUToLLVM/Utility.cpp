@@ -77,6 +77,47 @@ Value llGetPid(Location loc, RewriterBase &rewriter, ModuleOp moduleOp,
   return getSRegValue(rewriter, loc, sreg);
 }
 
+Value llGetPidByNVVM(Location loc, RewriterBase &rewriter, ModuleOp moduleOp,
+                     int axis) {
+  assert(axis >= 0 && axis < 3 && "Axis must be 0 (x), 1 (y), or 2 (z).");
+  assert(moduleOp && "ModuleOp cannot be null.");
+
+  // Ensure that numCTAs is 1; only supporting this case for now
+  int numCTAs = triton::gpu::TritonGPUDialect::getNumCTAs(moduleOp);
+  assert(numCTAs == 1 && "Only support numCTAs == 1 for now");
+
+  // // Determine the NVVM intrinsic name
+  // std::string intrinsicName = "llvm.nvvm.read.ptx.sreg.ctaid.";
+  // intrinsicName.push_back('x' + axis); // Append 'x', 'y', or 'z'
+
+  // // Get the module to declare or find the intrinsic
+  // auto i32Type = rewriter.getIntegerType(32);
+  // ModuleOp module =
+  //     rewriter.getInsertionBlock()->getParentOp()->getParentOfType<ModuleOp>();
+  // auto func = module.lookupSymbol<LLVM::LLVMFuncOp>(intrinsicName);
+  // if (!func) {
+  //   // Declare the intrinsic if it's not already present
+  //   auto funcType =
+  //       LLVM::LLVMFunctionType::get(i32Type, {}, /*isVarArg=*/false);
+  //   func = OpBuilder::atBlockBegin(module.getBody())
+  //              .create<LLVM::LLVMFuncOp>(loc, intrinsicName, funcType);
+  // }
+  // // Create the call to the intrinsic
+  // return rewriter.create<LLVM::CallOp>(loc, func, ValueRange{}).getResult();
+
+  // Create the NVVM read operation
+  Type i32Type = rewriter.getIntegerType(32);
+  if (axis == 0) {
+    return rewriter.create<NVVM::BlockIdXOp>(loc, i32Type);
+  } else if (axis == 1) {
+    return rewriter.create<NVVM::BlockIdYOp>(loc, i32Type);
+  } else if (axis == 2) {
+    return rewriter.create<NVVM::BlockIdZOp>(loc, i32Type);
+  }
+  llvm_unreachable("Unsupported NVVM intrinsic.");
+  return nullptr;
+}
+
 Value getSRegValue(OpBuilder &b, Location loc, const std::string &sRegStr) {
   PTXBuilder builder;
   auto &mov = builder.create("mov")->o("u32");
