@@ -3,7 +3,9 @@
 #include <stdbool.h>
 #define PY_SSIZE_T_CLEAN
 #include <Python.h>
+#include <dlfcn.h>
 #include <stdatomic.h>
+#include <stdio.h>
 
 // Raises a Python exception and returns false if code is not CUDA_SUCCESS.
 static bool gpuAssert(CUresult code, const char *file, int line) {
@@ -149,6 +151,45 @@ static PyObject *loadBinary(PyObject *self, PyObject *args) {
   }
   return Py_BuildValue("(KKii)", (uint64_t)mod, (uint64_t)fun, n_regs,
                        n_spills);
+}
+
+static PyObject *loadBinaryCuPBoP(PyObject *self, PyObject *args) {
+  const char *lib_name;  // Path to the shared library
+  const char *func_name; // Name of the function to load
+
+  // Parse Python arguments
+  if (!PyArg_ParseTuple(args, "ss", &lib_name, &func_name)) {
+    return NULL;
+  }
+
+  void *handle;
+  void *func_ptr;
+
+  // Load the shared library
+  Py_BEGIN_ALLOW_THREADS;
+  handle = dlopen(lib_name, RTLD_LAZY);
+  Py_END_ALLOW_THREADS;
+
+  if (!handle) {
+    PyErr_SetString(PyExc_RuntimeError, dlerror());
+    return NULL;
+  }
+
+  dlerror();
+
+  Py_BEGIN_ALLOW_THREADS;
+  printf("Loading function %s from %s\n", func_name, lib_name);
+  func_ptr = dlsym(handle, func_name);
+  Py_END_ALLOW_THREADS;
+
+  const char *error = dlerror();
+  if (error != NULL) {
+    dlclose(handle);
+    PyErr_SetString(PyExc_RuntimeError, error);
+    return NULL;
+  }
+
+  return Py_BuildValue("(KK)", (uint64_t)handle, (uint64_t)func_ptr);
 }
 
 typedef CUresult (*cuOccupancyMaxActiveClusters_t)(
@@ -389,6 +430,8 @@ static PyObject *fill2DTMADescriptor(PyObject *self, PyObject *args) {
 static PyMethodDef ModuleMethods[] = {
     {"load_binary", loadBinary, METH_VARARGS,
      "Load provided cubin into CUDA driver"},
+    {"load_binary_cupbop", loadBinaryCuPBoP, METH_VARARGS,
+     "Load provided .so/.a into CuPBoP driver"},
     {"get_device_properties", getDeviceProperties, METH_VARARGS,
      "Get the properties for a given device"},
     {"cuOccupancyMaxActiveClusters", occupancyMaxActiveClusters, METH_VARARGS,

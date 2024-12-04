@@ -27,9 +27,11 @@ def _path_to_binary(binary: str):
 
     for bin in paths:
         if os.path.exists(bin) and os.path.isfile(bin):
-            result = subprocess.check_output([bin, "--version"], stderr=subprocess.STDOUT)
+            result = subprocess.check_output(
+                [bin, "--version"], stderr=subprocess.STDOUT)
             if result is not None:
-                version = re.search(r".*release (\d+\.\d+).*", result.decode("utf-8"), flags=re.MULTILINE)
+                version = re.search(r".*release (\d+\.\d+).*",
+                                    result.decode("utf-8"), flags=re.MULTILINE)
                 if version is not None:
                     return bin, version.group(1)
     raise RuntimeError(f"Cannot find {binary}")
@@ -37,7 +39,8 @@ def _path_to_binary(binary: str):
 
 @functools.lru_cache()
 def get_ptxas_version():
-    version = subprocess.check_output([_path_to_binary("ptxas")[0], "--version"]).decode("utf-8")
+    version = subprocess.check_output(
+        [_path_to_binary("ptxas")[0], "--version"]).decode("utf-8")
     return version
 
 
@@ -57,7 +60,8 @@ def ptx_get_version(cuda_version) -> int:
         return 70 + minor
     if major == 10:
         return 63 + minor
-    raise RuntimeError("Triton only support CUDA 10.0 or higher, but got CUDA version: " + cuda_version)
+    raise RuntimeError(
+        "Triton only support CUDA 10.0 or higher, but got CUDA version: " + cuda_version)
 
 
 @functools.lru_cache()
@@ -105,17 +109,21 @@ class CUDAOptions:
 
     def __post_init__(self):
         default_libdir = Path(__file__).parent / 'lib'
-        extern_libs = {} if self.extern_libs is None else dict(self.extern_libs)
+        extern_libs = {} if self.extern_libs is None else dict(
+            self.extern_libs)
         if not extern_libs.get('libdevice', None):
-            extern_libs['libdevice'] = os.getenv("TRITON_LIBDEVICE_PATH", str(default_libdir / 'libdevice.10.bc'))
+            extern_libs['libdevice'] = os.getenv(
+                "TRITON_LIBDEVICE_PATH", str(default_libdir / 'libdevice.10.bc'))
         object.__setattr__(self, 'extern_libs', tuple(extern_libs.items()))
         assert self.num_warps > 0 and (self.num_warps & (self.num_warps - 1)) == 0, \
-               "num_warps must be a power of 2"
+            "num_warps must be a power of 2"
 
     def hash(self):
         hash_dict = dict(self.__dict__)
-        hash_dict["extern_libs"] = tuple((k, file_hash(v)) for k, v in sorted(hash_dict["extern_libs"]))
-        key = "_".join([f"{name}-{val}" for name, val in sorted(hash_dict.items())])
+        hash_dict["extern_libs"] = tuple(
+            (k, file_hash(v)) for k, v in sorted(hash_dict["extern_libs"]))
+        key = "_".join([f"{name}-{val}" for name,
+                       val in sorted(hash_dict.items())])
         return hashlib.sha256(key.encode("utf-8")).hexdigest()
 
 
@@ -132,7 +140,8 @@ class CUDABackend(BaseBackend):
         self.binary_ext = "cubin"
 
     def parse_options(self, opts) -> Any:
-        args = {k: opts[k] for k in CUDAOptions.__dataclass_fields__.keys() if k in opts}
+        args = {k: opts[k]
+                for k in CUDAOptions.__dataclass_fields__.keys() if k in opts}
         if "supported_fp8_dtypes" not in args:
             supported_fp8_dtypes = set(CUDAOptions.supported_fp8_dtypes)
             if self.capability >= 89:
@@ -144,7 +153,8 @@ class CUDABackend(BaseBackend):
                 args["deprecated_fp8_dtypes"] = ("fp8e4b15", )
 
         if "enable_fp_fusion" not in args:
-            args["enable_fp_fusion"] = os.getenv("TRITON_DEFAULT_FP_FUSION", "1") == "1"
+            args["enable_fp_fusion"] = os.getenv(
+                "TRITON_DEFAULT_FP_FUSION", "1") == "1"
         args["max_num_imprecise_acc_default"] = 2**30 if self.capability == 90 else 0
         return CUDAOptions(**args)
 
@@ -205,7 +215,8 @@ class CUDABackend(BaseBackend):
         # TTIR -> TTGIR
         pm = ir.pass_manager(mod.context)
         pm.enable_debug()
-        passes.ttir.add_convert_to_ttgpuir(pm, f"cuda:{capability}", opt.num_warps, 32, opt.num_ctas)
+        passes.ttir.add_convert_to_ttgpuir(
+            pm, f"cuda:{capability}", opt.num_warps, 32, opt.num_ctas)
         # optimize TTGIR
         passes.ttgpuir.add_coalesce(pm)
         if capability // 10 >= 8:
@@ -234,13 +245,15 @@ class CUDABackend(BaseBackend):
             nvidia.passes.ttnvgpuir.add_tma_lowering(pm)
         passes.common.add_canonicalizer(pm)
         pm.run(mod)
-        metadata["cluster_dims"] = (cluster_info.clusterDimX, cluster_info.clusterDimY, cluster_info.clusterDimZ)
+        metadata["cluster_dims"] = (
+            cluster_info.clusterDimX, cluster_info.clusterDimY, cluster_info.clusterDimZ)
         return mod
 
     @staticmethod
     def make_llir(src, metadata, options, capability):
         # warp-specialization mutates num_warps
-        num_warp_groups = src.get_int_attr("triton_gpu.num-warp-groups-per-cta")
+        num_warp_groups = src.get_int_attr(
+            "triton_gpu.num-warp-groups-per-cta")
         if num_warp_groups is not None:
             metadata["num_warps"] *= num_warp_groups
         mod = src
@@ -306,14 +319,16 @@ class CUDABackend(BaseBackend):
         triple = 'nvptx64-nvidia-cuda'
         proc = 'sm_90a' if capability == 90 else f'sm_{capability}'
         features = get_features(opt)
-        ret = llvm.translate_to_asm(src, triple, proc, features, ['nvptx-short-ptr'], opt.enable_fp_fusion, False)
+        ret = llvm.translate_to_asm(src, triple, proc, features, [
+                                    'nvptx-short-ptr'], opt.enable_fp_fusion, False)
         # Find kernel names (there should only be one)
         names = re.findall(r".visible .entry ([a-zA-Z_][a-zA-Z0-9_]*)", ret)
         assert len(names) == 1
         metadata["name"] = names[0]
         # post-process
         ptx_version = f'{ptx_version//10}.{ptx_version%10}'
-        ret = re.sub(r'\.version \d+\.\d+', f'.version {ptx_version}', ret, flags=re.MULTILINE)
+        ret = re.sub(r'\.version \d+\.\d+',
+                     f'.version {ptx_version}', ret, flags=re.MULTILINE)
         # Remove the debug flag that prevents ptxas from optimizing the code
         ret = re.sub(r",\s*debug|debug,\s*", "", ret)
         if os.environ.get("NVPTX_ENABLE_DUMP", "0") == "1":
@@ -325,20 +340,24 @@ class CUDABackend(BaseBackend):
     def make_cubin(src, metadata, opt, capability):
         ptxas, _ = _path_to_binary("ptxas")
         with tempfile.NamedTemporaryFile(delete=False, mode='w', suffix='.ptx') as fsrc, \
-            tempfile.NamedTemporaryFile(delete=False, mode='r', suffix='.log') as flog:
+                tempfile.NamedTemporaryFile(delete=False, mode='r', suffix='.log') as flog:
             fsrc.write(src)
             fsrc.flush()
             fbin = fsrc.name + '.o'
 
-            line_info = [] if os.environ.get('TRITON_DISABLE_LINE_INFO') else ['-lineinfo']
+            line_info = [] if os.environ.get(
+                'TRITON_DISABLE_LINE_INFO') else ['-lineinfo']
             fmad = [] if opt.enable_fp_fusion else ['--fmad=false']
             suffix = 'a' if capability == 90 else ''
-            opt_level = ['--opt-level', '0'] if os.environ.get("DISABLE_PTXAS_OPT", "0") == "1" else []
+            opt_level = [
+                '--opt-level', '0'] if os.environ.get("DISABLE_PTXAS_OPT", "0") == "1" else []
             ptxas_cmd = [
-                ptxas, *line_info, *fmad, '-v', *opt_level, f'--gpu-name=sm_{capability}{suffix}', fsrc.name, '-o', fbin
+                ptxas, *line_info, *fmad, '-v', *
+                opt_level, f'--gpu-name=sm_{capability}{suffix}', fsrc.name, '-o', fbin
             ]
             try:
-                subprocess.run(ptxas_cmd, check=True, close_fds=False, stderr=flog)
+                subprocess.run(ptxas_cmd, check=True,
+                               close_fds=False, stderr=flog)
                 if os.path.exists(fsrc.name):
                     os.remove(fsrc.name)
                 if os.path.exists(flog.name):
@@ -367,11 +386,16 @@ class CUDABackend(BaseBackend):
         return cubin
 
     def add_stages(self, stages, options):
-        stages["ttir"] = lambda src, metadata: self.make_ttir(src, metadata, options)
-        stages["ttgir"] = lambda src, metadata: self.make_ttgir(src, metadata, options, self.capability)
-        stages["llir"] = lambda src, metadata: self.make_llir(src, metadata, options, self.capability)
-        stages["ptx"] = lambda src, metadata: self.make_ptx(src, metadata, options, self.capability)
-        stages["cubin"] = lambda src, metadata: self.make_cubin(src, metadata, options, self.capability)
+        stages["ttir"] = lambda src, metadata: self.make_ttir(
+            src, metadata, options)
+        stages["ttgir"] = lambda src, metadata: self.make_ttgir(
+            src, metadata, options, self.capability)
+        stages["llir"] = lambda src, metadata: self.make_llir(
+            src, metadata, options, self.capability)
+        stages["ptx"] = lambda src, metadata: self.make_ptx(
+            src, metadata, options, self.capability)
+        stages["cubin"] = lambda src, metadata: self.make_cubin(
+            src, metadata, options, self.capability)
 
     @functools.lru_cache()
     def hash(self):
@@ -389,7 +413,7 @@ class CUDACuPBoPBackend(BaseBackend):
         super().__init__(target)
         self.capability = target.arch
         assert isinstance(self.capability, int)
-        self.binary_ext = "object" # .o for CPU programs
+        self.binary_ext = "obj"  # .o for CPU programs
 
     def parse_options(self, opts) -> Any:
         args = {k: opts[k]
@@ -553,36 +577,71 @@ class CUDACuPBoPBackend(BaseBackend):
         return ret
 
     @staticmethod
-    def make_asm(src, metadata, opt, capability):
-        triple = 'x86_64-unknown-linux-gnu'
-        proc = ''
-        features = get_features(opt)
-        ret = llvm.translate_to_asm(src, triple, proc, features, [], opt.enable_fp_fusion, False)
-        # Find kernel names (there should only be one)
-        names = re.findall(r".visible .entry ([a-zA-Z_][a-zA-Z0-9_]*)", ret)
-        assert len(names) == 1
-        metadata["name"] = names[0]
-        if os.environ.get("NVPTX_ENABLE_DUMP", "0") == "1":
-            print("// -----// CuPBoP CPU Assembly Dump //----- //")
-            print(ret)
-        return ret
-
-    @staticmethod
-    def make_obj(src, metadata, opt, capability):
-        clang, _ = _path_to_binary("clang")
-        with tempfile.NamedTemporaryFile(delete=False, mode='w', suffix='.o') as fsrc, \
+    def make_cpullir(src, metadata, opt, capability):
+        with tempfile.NamedTemporaryFile(delete=False, mode='w', suffix='.ll') as fsrc, \
                 tempfile.NamedTemporaryFile(delete=False, mode='r', suffix='.log') as flog:
             fsrc.write(src)
             fsrc.flush()
-            fbin = fsrc.name + '.o'
+            f_input_bc = fsrc.name + '_gpu_' + '.ll'
+            fbc = fsrc.name + '_cpu_' + '.bc'
+            f_output_ll = fsrc.name + '_cpu_' + '.ll'
 
-            line_info = [] if os.environ.get(
-                'TRITON_DISABLE_LINE_INFO') else ['-lineinfo']
-            fmad = [] if opt.enable_fp_fusion else ['--fmad=false']
-            opt_level = [
-                '--opt-level', '0'] if os.environ.get("DISABLE_PTXAS_OPT", "0") == "1" else []
+            llvm_as_cmd = [
+                "llvm-as", fsrc.name, '-o', f_input_bc
+            ]
+            # Translate human-readable LLVM IR to bitcode
+            subprocess.run(llvm_as_cmd, check=True, close_fds=False)
+
+            # Apply CuPBoP to translate GPU LLVM IR to CPU LLVM IR
+            cupbop_cmd = [
+                "kernelTranslator", f_input_bc, fbc
+            ]
+            try:
+                subprocess.run(cupbop_cmd, check=True,
+                               close_fds=False, stderr=flog)
+                if os.path.exists(fsrc.name):
+                    os.remove(fsrc.name)
+                if os.path.exists(flog.name):
+                    os.remove(flog.name)
+            except subprocess.CalledProcessError as e:
+                with open(flog.name) as log_file:
+                    log = log_file.read()
+                if os.path.exists(flog.name):
+                    os.remove(flog.name)
+                error = f'`CuPBoP kernelTranslator` failed with error code {e.returncode}'
+
+                raise RuntimeError(f'{error}\n'
+                                   f'`CuPBoP` stderr:\n{log}\n'
+                                   f'Repro command: {cupbop_cmd}\n')
+            # Convert bitcode to human-readable LLVM IR
+            llvm_dis_cmd = [
+                "llvm-dis", fbc, '-o', f_output_ll
+            ]
+            subprocess.run(llvm_dis_cmd, check=True, close_fds=False)
+            if os.path.exists(fbc):
+                os.remove(fbc)
+            with open(f_output_ll, 'r') as f:
+                cpu_llvm_ir = f.read()
+            if os.path.exists(f_output_ll):
+                os.remove(f_output_ll)
+        names = re.findall(
+            r"define void @([a-zA-Z_][a-zA-Z0-9_]*)", cpu_llvm_ir)
+        assert len(names) == 1
+        metadata["name"] = names[0]
+        return cpu_llvm_ir
+
+    @staticmethod
+    def make_obj(src, metadata, opt, capability):
+        with tempfile.NamedTemporaryFile(delete=False, mode='w', suffix=".ll") as fsrc, \
+                tempfile.NamedTemporaryFile(delete=False, mode='r', suffix='.log') as flog:
+            fsrc.write(src)
+            fsrc.flush()
+            fbin = fsrc.name + '.so'
+
+            shared_library = ["-shared", "-fPIC"]
+            opt_level = ["-O3"]
             clang_cmd = [
-                clang, *line_info, *fmad, '-v', *
+                "clang", *shared_library, '-v', *
                 opt_level, fsrc.name, '-o', fbin
             ]
             try:
@@ -605,8 +664,7 @@ class CUDACuPBoPBackend(BaseBackend):
 
             with open(fbin, 'rb') as f:
                 cpu_bin = f.read()
-            if os.path.exists(fbin):
-                os.remove(fbin)
+                metadata["obj_path"] = fbin
         return cpu_bin
 
     def add_stages(self, stages, options):
@@ -616,8 +674,13 @@ class CUDACuPBoPBackend(BaseBackend):
             src, metadata, options, self.capability)
         stages["llir"] = lambda src, metadata: self.make_llir(
             src, metadata, options, self.capability)
-        stages["asm"] = lambda src, metadata: self.make_asm(
+        stages["cpullir"] = lambda src, metadata: self.make_cpullir(
             src, metadata, options, self.capability)
+        if os.environ.get('TRITON_CUPBOP', '0') == '0':
+            # CuPBoP backend does not require LLVM->PTX translation
+            # Instead, CuPBoP directly generates object files from LLVM IR
+            stages["asm"] = lambda src, metadata: self.make_asm(
+                src, metadata, options, self.capability)
         stages["obj"] = lambda src, metadata: self.make_obj(
             src, metadata, options, self.capability)
 

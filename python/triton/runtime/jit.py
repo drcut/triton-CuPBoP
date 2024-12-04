@@ -65,7 +65,8 @@ class DependenciesFinder(ast.NodeVisitor):
         # variable `foo` may actually have a different value in the different
         # functions.  Thus this map is actually
         #  (var_name, id(__globals__)) -> (var_value, __globals__).
-        self.used_global_vals: Dict[Tuple[str, int], Tuple[Any, Dict[str, Any]]] = {}
+        self.used_global_vals: Dict[Tuple[str, int],
+                                    Tuple[Any, Dict[str, Any]]] = {}
 
         self.visiting_arg_default_value = False
 
@@ -120,9 +121,11 @@ class DependenciesFinder(ast.NodeVisitor):
                 and type(val) is not ModuleType
                 # It would be pretty evil if we used function `foo` inside of
                 # `bar` and then someone did `foo = baz`.
-                and not isinstance(val, JITFunction) and not getattr(val, "__triton_builtin__", False)  #
+                #
+                and not isinstance(val, JITFunction) and not getattr(val, "__triton_builtin__", False)
                 and node.id not in self.supported_python_builtins):
-            self.used_global_vals[(node.id, id(self.globals))] = (val, self.globals)
+            self.used_global_vals[(node.id, id(self.globals))] = (
+                val, self.globals)
 
         self._update_hash(val)
         return val
@@ -194,7 +197,8 @@ class DependenciesFinder(ast.NodeVisitor):
             # get it from `a, b = ...` -- in that case, node.targets is a single
             # Tuple, and in fact we *do* need to handle that case if we want
             # existing code to work.
-            raise TypeError("Simultaneous multiple assignment is not supported.")
+            raise TypeError(
+                "Simultaneous multiple assignment is not supported.")
 
         self.visitAssnTarget(node.targets[0])
 
@@ -313,7 +317,8 @@ def mangle_type(arg, is_const=False):
         dsk = (arg.dtype, is_const)
         res = dtype2str.get(dsk, None)
         if res is None:
-            res = ("*k" if dsk[1] else "*") + type_canonicalisation_dict[str(dsk[0]).split('.')[-1]]
+            res = ("*k" if dsk[1] else "*") + \
+                type_canonicalisation_dict[str(dsk[0]).split('.')[-1]]
             dtype2str[dsk] = res
         return res
 
@@ -332,7 +337,8 @@ class KernelInterface(Generic[T]):
 
 
 def serialize_specialization_data(name, signature, constants, attrs, options, key):
-    constants = {key: str(value) if value.__class__.__name__ == "dtype" else value for key, value in constants.items()}
+    constants = {key: str(value) if value.__class__.__name__ ==
+                 "dtype" else value for key, value in constants.items()}
     import json
     obj = {
         'name': name, 'signature': signature, 'constants': constants, 'attrs': attrs.to_dict(), 'options':
@@ -373,13 +379,16 @@ def create_function_from_signature(sig, kparams):
             non_constexpr_vals.append(name)
             if not kp.do_not_specialize:
                 if not kp.do_not_specialize_on_alignment:
-                    specialisations.append('compute_spec_key(%s, align=True)' % name)
+                    specialisations.append(
+                        'compute_spec_key(%s, align=True)' % name)
                 else:
-                    specialisations.append('compute_spec_key(%s, align=False)' % name)
+                    specialisations.append(
+                        'compute_spec_key(%s, align=False)' % name)
             if kp.annotation_type:
                 signature_types.append('"%s"' % kp.annotation_type)
             else:
-                signature_types.append('mangle_type(%s, %s)' % (name, 'True' if kp.is_const else 'False'))
+                signature_types.append('mangle_type(%s, %s)' % (
+                    name, 'True' if kp.is_const else 'False'))
 
     cache_key = ''.join([x + ', ' for x in signature_types + specialisations])
     constexpr_vals = ''.join([x + ', ' for x in constexpr_vals])
@@ -537,7 +546,8 @@ class JITFunction(KernelInterface[T]):
 
         name = self.fn.__name__
         module = self.fn.__module__
-        arg_reprs = ", ".join([f"{param.name}: {ty}" for param, ty in zip(self.params, key[1])])
+        arg_reprs = ", ".join(
+            [f"{param.name}: {ty}" for param, ty in zip(self.params, key[1])])
         repr = f"{name}[num_warps={options.num_warps}, num_ctas={options.num_ctas}, num_stages={options.num_stages}, enable_fp_fusion={options.enable_fp_fusion}]({arg_reprs})"
 
         class JitFunctionInfo:
@@ -548,7 +558,8 @@ class JITFunction(KernelInterface[T]):
                 self.jit_function = jit_function
                 pass
 
-        specialization_data = serialize_specialization_data(name, signature, constants, configs[0], options, key)
+        specialization_data = serialize_specialization_data(
+            name, signature, constants, configs[0], options, key)
 
         kwargs = {
             'signature': signature,
@@ -590,9 +601,12 @@ class JITFunction(KernelInterface[T]):
         self.compile = compile
         self.ASTSource = ASTSource
         self.make_backend = make_backend
-        self.binder = create_function_from_signature(self.signature, self.params)
-        self.constexpr_indices = [i for (i, p) in enumerate(self.params) if p.is_constexpr]
-        self.non_constexpr_indices = [i for (i, p) in enumerate(self.params) if not p.is_constexpr]
+        self.binder = create_function_from_signature(
+            self.signature, self.params)
+        self.constexpr_indices = [
+            i for (i, p) in enumerate(self.params) if p.is_constexpr]
+        self.non_constexpr_indices = [
+            i for (i, p) in enumerate(self.params) if not p.is_constexpr]
         self.specialised_indices = [
             i for (i, p) in enumerate(self.params) if (not p.do_not_specialize) and (not p.is_constexpr)
         ]
@@ -610,7 +624,8 @@ class JITFunction(KernelInterface[T]):
         if self.binder is None:
             self.create_binder()
 
-        bound_args, sig_and_spec, constexpr_vals, non_constexpr_vals, excess_kwargs = self.binder(*args, **kwargs)
+        bound_args, sig_and_spec, constexpr_vals, non_constexpr_vals, excess_kwargs = self.binder(
+            *args, **kwargs)
 
         # compute cache key
         key = ''.join(sig_and_spec) + str((constexpr_vals, excess_kwargs))
@@ -628,7 +643,8 @@ class JITFunction(KernelInterface[T]):
             assert "stream" not in kwargs, "stream option is deprecated; current stream will be used"
             for k in excess_kwargs:
                 if k not in options.__dict__:
-                    raise KeyError("Keyword argument %s was specified but unrecognised" % k)
+                    raise KeyError(
+                        "Keyword argument %s was specified but unrecognised" % k)
 
             bound_vals = tuple(bound_args.values())
 
@@ -638,7 +654,8 @@ class JITFunction(KernelInterface[T]):
             # and None arguments, resulting in a downstream mismatch:
             sigkeys = [self.params[i].name for i in self.non_constexpr_indices]
             sigvals = sig_and_spec[:len(sigkeys)]
-            signature = {k: ('*i8' if (v == 'none') else v) for (k, v) in zip(sigkeys, sigvals)}
+            signature = {k: ('*i8' if (v == 'none') else v)
+                         for (k, v) in zip(sigkeys, sigvals)}
 
             configs = (self._get_config(*bound_vals), )
             constants = {
@@ -648,7 +665,8 @@ class JITFunction(KernelInterface[T]):
             }
             for i, arg in constants.items():
                 if callable(arg):
-                    raise TypeError(f"Callable constexpr at index {i} is not supported")
+                    raise TypeError(
+                        f"Callable constexpr at index {i} is not supported")
 
             if self._call_hook(key, signature, device, constants, options, configs, warmup, before=True):
                 return None
@@ -660,7 +678,8 @@ class JITFunction(KernelInterface[T]):
                 options=options.__dict__,
             )
             self.cache[device][key] = kernel
-            self._call_hook(key, signature, device, constants, options, configs, warmup, before=False)
+            self._call_hook(key, signature, device, constants,
+                            options, configs, warmup, before=False)
 
         # Check that used global values have not changed.
         not_present = object()
@@ -683,7 +702,8 @@ class JITFunction(KernelInterface[T]):
             grid_2 = grid[2] if grid_size > 2 else 1
 
             # launch kernel
-            launch_metadata = kernel.launch_metadata(grid, stream, *non_constexpr_vals)
+            launch_metadata = kernel.launch_metadata(
+                grid, stream, *non_constexpr_vals)
             kernel.run(grid_0, grid_1, grid_2, stream, kernel.function, kernel.packed_metadata, launch_metadata,
                        self.CompiledKernel.launch_enter_hook, self.CompiledKernel.launch_exit_hook, *non_constexpr_vals)
         return kernel
@@ -713,7 +733,8 @@ class JITFunction(KernelInterface[T]):
 
         # function source code (without decorators)
         self.src = textwrap.dedent(inspect.getsource(fn))
-        self.src = self.src[re.search(r"^def\s+\w+\s*\(", self.src, re.MULTILINE).start():]
+        self.src = self.src[re.search(
+            r"^def\s+\w+\s*\(", self.src, re.MULTILINE).start():]
         # cache of just-in-time compiled kernels
         self.cache = defaultdict(dict)
         self.hash = None
@@ -727,12 +748,14 @@ class JITFunction(KernelInterface[T]):
         # Different functions can have different __globals__ maps, so the map
         # key is actually (var name, id(__globals__)), and the map value is
         # (value, __globals__).
-        self.used_global_vals: Dict[Tuple[str, int], Tuple[Any, Dict[str, Any]]] = {}
+        self.used_global_vals: Dict[Tuple[str, int],
+                                    Tuple[Any, Dict[str, Any]]] = {}
 
         # JITFunction can be instantiated as kernel
         # when called with a grid using __getitem__
         self.kernel = None
-        self.debug = True if os.environ.get("TRITON_DEBUG", "0") == "1" else debug
+        self.debug = True if os.environ.get(
+            "TRITON_DEBUG", "0") == "1" else debug
         self.noinline = noinline
 
         # TODO(jlebar): Remove uses of these fields outside this file, then
@@ -753,10 +776,13 @@ class JITFunction(KernelInterface[T]):
     def cache_key(self):
         # TODO : hash should be attribute of `self`
         if self.hash is None:
-            dependencies_finder = DependenciesFinder(name=self.__name__, globals=self.__globals__, src=self.src)
+            dependencies_finder = DependenciesFinder(
+                name=self.__name__, globals=self.__globals__, src=self.src)
             dependencies_finder.visit(self.parse())
-            self.hash = dependencies_finder.ret + str(self.starting_line_number)
-            self.used_global_vals = dict(sorted(dependencies_finder.used_global_vals.items()))
+            self.hash = dependencies_finder.ret + \
+                str(self.starting_line_number)
+            self.used_global_vals = dict(
+                sorted(dependencies_finder.used_global_vals.items()))
         return self.hash
 
     def warmup(self, *args, grid, **kwargs):
@@ -776,7 +802,8 @@ class JITFunction(KernelInterface[T]):
             for key, value in deserialized_obj['constants'].items()
         }
         signature = dict(deserialized_obj['signature'].items())
-        src = ASTSource(self, signature, constants, AttrsDescriptor.from_dict(deserialized_obj['attrs']))
+        src = ASTSource(self, signature, constants,
+                        AttrsDescriptor.from_dict(deserialized_obj['attrs']))
         options = {
             key: tuple(value) if isinstance(value, list) else value
             for key, value in deserialized_obj['options'].items()
@@ -797,7 +824,8 @@ class JITFunction(KernelInterface[T]):
         return tree
 
     def __call__(self, *args, **kwargs):
-        raise RuntimeError("Cannot call @triton.jit'd outside of the scope of a kernel")
+        raise RuntimeError(
+            "Cannot call @triton.jit'd outside of the scope of a kernel")
 
     def __setattr__(self, name, value):
         super(JITFunction, self).__setattr__(name, value)

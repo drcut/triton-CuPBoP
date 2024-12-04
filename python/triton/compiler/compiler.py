@@ -95,7 +95,8 @@ class ASTSource:
         self.constants = constants
         self.attrs = attrs
         if isinstance(self.signature, str):
-            self.signature = {k: v.strip() for k, v in enumerate(self.signature.split(","))}
+            self.signature = {k: v.strip()
+                              for k, v in enumerate(self.signature.split(","))}
         else:
             for k in self.signature.keys():
                 if not isinstance(k, str):
@@ -113,7 +114,8 @@ class ASTSource:
         sorted_sig = [v for k, v in sorted(self.signature.items())]
         # Note - we stringify the keys here to allow sorting to work for cases
         # where constants have mixed int/str keys.
-        sorted_constants = sorted((str(k), v) for k, v in self.constants.items())
+        sorted_constants = sorted((str(k), v)
+                                  for k, v in self.constants.items())
         key = f"{self.fn.cache_key}-{self.attrs.hash()}-{sorted_sig}-{sorted_constants}"
         return hashlib.sha256(key.encode("utf-8")).hexdigest()
 
@@ -136,7 +138,8 @@ class IRSource:
         self.name = match.group(1)
         signature = match.group(2)
         types = re.findall(arg_type_pattern[self.ext], signature)
-        self.signature = {k: convert_type_repr(ty) for k, ty in enumerate(types)}
+        self.signature = {k: convert_type_repr(
+            ty) for k, ty in enumerate(types)}
 
     def hash(self):
         return hashlib.sha256(self.src.encode("utf-8")).hexdigest()
@@ -256,7 +259,8 @@ def compile(src, target=None, options=None):
     # core changes to make it easier to track kernels by hash.
     enable_override = os.environ.get("TRITON_KERNEL_OVERRIDE", "0") == "1"
     enable_ir_dump = os.environ.get("TRITON_KERNEL_DUMP", "0") == "1"
-    fn_override_manager = get_override_manager(src.hash()) if enable_override else None
+    fn_override_manager = get_override_manager(
+        src.hash()) if enable_override else None
     fn_dump_manager = get_dump_manager(src.hash()) if enable_ir_dump else None
     # Pre-truncate the file name here to avoid hitting the 255 character limit on common platforms.
     # The final file name in the cache will have a format of f"{filename}.{ext}.tmp.pid_{pid}_{uuid}".
@@ -302,7 +306,8 @@ def compile(src, target=None, options=None):
         if (fn_override_manager is not None and (full_name := fn_override_manager.get_file(ir_filename)) is not None):
             print(f"\nOverriding kernel with file {full_name}")
             next_module = parse(full_name, ext, context)
-        metadata_group[ir_filename] = fn_cache_manager.put(next_module, ir_filename)
+        metadata_group[ir_filename] = fn_cache_manager.put(
+            next_module, ir_filename)
         if fn_dump_manager is not None:
             fn_dump_manager.put(next_module, ir_filename)
         # use an env variable to parse ir from file
@@ -325,7 +330,8 @@ def compile(src, target=None, options=None):
 
 
 def make_backend(target):
-    actives = [x.compiler for x in backends.values() if x.compiler.supports_target(target)]
+    actives = [x.compiler for x in backends.values(
+    ) if x.compiler.supports_target(target)]
     if len(actives) != 1:
         raise RuntimeError(
             f"{len(actives)} compatible backends for target ({target.backend}) ({actives}). There should only be one.")
@@ -357,13 +363,16 @@ class CompiledKernel:
 
     def __init__(self, src, metadata_group, hash):
         from collections import namedtuple
-        metadata_path = next((Path(p) for c, p in metadata_group.items() if c.endswith(".json")))
+        metadata_path = next(
+            (Path(p) for c, p in metadata_group.items() if c.endswith(".json")))
         metadata = json.loads(metadata_path.read_text())
         metadata['cluster_dims'] = tuple(metadata['cluster_dims'])
         # JSON serialization dumps the target as a dict. Restore it to a GPUTarget.
         target = metadata['target']
-        metadata['target'] = GPUTarget(target['backend'], target['arch'], target['warp_size'])
-        KernelMetadata = namedtuple('KernelMetadata', sorted(list(metadata.keys())))
+        metadata['target'] = GPUTarget(
+            target['backend'], target['arch'], target['warp_size'])
+        KernelMetadata = namedtuple(
+            'KernelMetadata', sorted(list(metadata.keys())))
         self.metadata = KernelMetadata(**metadata)
         backend = make_backend(self.metadata.target)
         self.packed_metadata = backend.pack_metadata(self.metadata)
@@ -371,10 +380,12 @@ class CompiledKernel:
         self.hash = hash
         self.name = self.metadata.name
         # stores the text of each level of IR that was generated during compilation
-        asm_files = [Path(p) for c, p in metadata_group.items() if not c.endswith(".json")]
+        asm_files = [Path(p) for c, p in metadata_group.items()
+                     if not c.endswith(".json")]
         binary_ext = backend.binary_ext
         self.asm = {
-            file.suffix[1:]: file.read_bytes() if file.suffix[1:] == binary_ext else file.read_text()
+            file.suffix[1:]: file.read_bytes(
+            ) if file.suffix[1:] == binary_ext else file.read_text()
             for file in asm_files
         }
         self.kernel = self.asm[binary_ext]
@@ -390,13 +401,22 @@ class CompiledKernel:
         device = driver.active.get_current_device()
         # create launcher
         self.run = driver.active.launcher_cls(self.src, self.metadata)
-        # not enough shared memory to run the kernel
-        max_shared = driver.active.utils.get_device_properties(device)["max_shared_mem"]
-        if self.metadata.shared > max_shared:
-            raise OutOfResources(self.metadata.shared, max_shared, "shared memory")
-        # TODO: n_regs, n_spills should be metadata generated when calling `ptxas`
-        self.module, self.function, self.n_regs, self.n_spills = driver.active.utils.load_binary(
-            self.name, self.kernel, self.metadata.shared, device)
+        if os.environ.get("TRITON_CUPBOP", "0") == "0":
+            # not enough shared memory to run the kernel
+            max_shared = driver.active.utils.get_device_properties(device)[
+                "max_shared_mem"]
+            if self.metadata.shared > max_shared:
+                raise OutOfResources(self.metadata.shared,
+                                     max_shared, "shared memory")
+            # TODO: n_regs, n_spills should be metadata generated when calling `ptxas`
+            # CuPBoP does not support load_binary yet.
+            self.module, self.function, self.n_regs, self.n_spills = driver.active.utils.load_binary(
+                self.name, self.kernel, self.metadata.shared, device)
+        else:
+            print("self.metadata.obj_path", self.metadata.obj_path)
+            print("self.name", self.name)
+            self.handler, self.function = driver.active.utils.load_binary_cupbop(
+                self.metadata.obj_path, self.name)
 
     def __getattribute__(self, name):
         if name == 'run':
@@ -406,7 +426,8 @@ class CompiledKernel:
     def launch_metadata(self, grid, stream, *args):
         if CompiledKernel.launch_enter_hook is None:
             return None
-        ret = LazyDict({"name": self.name, "function": self.function, "stream": stream})
+        ret = LazyDict(
+            {"name": self.name, "function": self.function, "stream": stream})
         if not isinstance(self.src, ASTSource) or self.src.fn.launch_metadata is None:
             return ret
         arg_dict = {}
