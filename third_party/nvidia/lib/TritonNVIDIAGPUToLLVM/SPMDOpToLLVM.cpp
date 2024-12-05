@@ -1,5 +1,6 @@
 #include "PatternTritonGPUOpToLLVM.h"
 #include "Utility.h"
+#include "mlir/Dialect/LLVMIR/NVVMDialect.h"
 
 namespace {
 
@@ -24,10 +25,27 @@ struct GetNumProgramsOpConversion
 
     Location loc = op->getLoc();
     assert(op.getAxisAsInt() < 3);
-    std::string sreg = numCTAs == 1 ? "%nctaid." : "%nclusterid.";
-    sreg.append(1, 'x' + op.getAxisAsInt()); // 0 -> 'x', 1 -> 'y', 2 -> 'z'
-
-    Value numPrograms = LLVM::NVIDIA::getSRegValue(rewriter, loc, sreg);
+    Value numPrograms;
+    if (numCTAs == 1) {
+      switch (op.getAxisAsInt()) {
+      case 0:
+        numPrograms =
+            rewriter.create<NVVM::GridDimXOp>(loc, rewriter.getI32Type());
+        break;
+      case 1:
+        numPrograms =
+            rewriter.create<NVVM::GridDimYOp>(loc, rewriter.getI32Type());
+        break;
+      case 2:
+        numPrograms =
+            rewriter.create<NVVM::GridDimZOp>(loc, rewriter.getI32Type());
+        break;
+      }
+    } else {
+      std::string sreg = numCTAs == 1 ? "%nctaid." : "%nclusterid.";
+      sreg.append(1, 'x' + op.getAxisAsInt()); // 0 -> 'x', 1 -> 'y', 2 -> 'z'
+      numPrograms = LLVM::NVIDIA::getSRegValue(rewriter, loc, sreg);
+    }
     rewriter.replaceOp(op, numPrograms);
     return success();
   }
