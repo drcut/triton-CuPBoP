@@ -566,9 +566,6 @@ class CUDACuPBoPBackend(BaseBackend):
         if options.extern_libs:
             paths = [path for (name, path) in options.extern_libs]
             llvm.link_extern_libs(llvm_mod, paths)
-
-        llvm.optimize_module(llvm_mod, llvm.OPTIMIZE_O3)
-
         # Get some metadata
         metadata["shared"] = src.get_int_attr("triton_gpu.shared")
         ret = str(llvm_mod)
@@ -582,16 +579,14 @@ class CUDACuPBoPBackend(BaseBackend):
                 tempfile.NamedTemporaryFile(delete=False, mode='r', suffix='.log') as flog:
             fsrc.write(src)
             fsrc.flush()
-            f_input_bc = fsrc.name + '_gpu_' + '.ll'
+            f_input_bc = fsrc.name + '_gpu_' + '.bc'
             fbc = fsrc.name + '_cpu_' + '.bc'
             f_output_ll = fsrc.name + '_cpu_' + '.ll'
-
             llvm_as_cmd = [
                 "llvm-as", fsrc.name, '-o', f_input_bc
             ]
             # Translate human-readable LLVM IR to bitcode
             subprocess.run(llvm_as_cmd, check=True, close_fds=False)
-
             # Apply CuPBoP to translate GPU LLVM IR to CPU LLVM IR
             cupbop_cmd = [
                 "kernelTranslator", f_input_bc, fbc
@@ -609,7 +604,6 @@ class CUDACuPBoPBackend(BaseBackend):
                 if os.path.exists(flog.name):
                     os.remove(flog.name)
                 error = f'`CuPBoP kernelTranslator` failed with error code {e.returncode}'
-
                 raise RuntimeError(f'{error}\n'
                                    f'`CuPBoP` stderr:\n{log}\n'
                                    f'Repro command: {cupbop_cmd}\n')

@@ -544,26 +544,8 @@ struct FDivOpConversion
                                    ConversionPatternRewriter &rewriter,
                                    Type elemTy, MultipleOperandsRange operands,
                                    Location loc) const {
-    PTXBuilder ptxBuilder;
-    auto &fdiv = *ptxBuilder.create<PTXInstr>("div");
-    unsigned bitwidth = elemTy.getIntOrFloatBitWidth();
-    if (32 == bitwidth) {
-      fdiv.o("full").o("f32");
-    } else if (64 == bitwidth) {
-      fdiv.o("rn").o("f64");
-    } else {
-      llvm::report_fatal_error("Unsupported bitwidth");
-    }
-
-    auto res = ptxBuilder.newOperand(bitwidth == 32 ? "=r" : "=l");
-    auto lhs =
-        ptxBuilder.newOperand(operands[0][0], bitwidth == 32 ? "r" : "l");
-    auto rhs =
-        ptxBuilder.newOperand(operands[0][1], bitwidth == 32 ? "r" : "l");
-    fdiv(res, lhs, rhs);
-
-    Value ret = ptxBuilder.launch(rewriter, loc, elemTy, false);
-    return {ret};
+    return {rewriter.create<LLVM::FDivOp>(loc, elemTy, operands[0][0],
+                                          operands[0][1])};
   }
 };
 

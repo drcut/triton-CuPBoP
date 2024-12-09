@@ -31,6 +31,7 @@ public:
     assert(helper.isSupportedLayout() &&
            "Unexpected srcLayout in ReduceOpConversion");
     Location loc = op->getLoc();
+    auto *context = rewriter.getContext();
 
     auto srcValues = unpackInputs(loc, op, adaptor, rewriter);
     std::map<SmallVector<unsigned>, SmallVector<Value>> accs;
@@ -38,47 +39,50 @@ public:
     // First reduce all the values along axis within each thread.
     reduceWithinThreads(helper, srcValues, accs, indices, rewriter);
 
-    // Then reduce across threads within a warp.
-    reduceWithinWarps(helper, accs, rewriter);
+    // // Create global memory buffer for reduction
+    unsigned totalThreads = std::accumulate(helper.getSrcShape().begin(),
+                                            helper.getSrcShape().end(), 1,
+                                            std::multiplies<unsigned>());
+    Type elementType = op.getInputTypes()[0].getElementType();
 
-    if (helper.isWarpSynchronous()) {
-      // If all the values to be reduced are within the same warp there is
-      // nothing left to do.
-      packResults(helper, accs, rewriter);
-      return success();
+    auto globalType = LLVM::LLVMArrayType::get(elementType, totalThreads);
+    LLVM::GlobalOp globalMemOp;
+    {
+      RewriterBase::InsertionGuard guard(rewriter);
+      auto moduleOp =
+          rewriter.getBlock()->getParent()->getParentOfType<ModuleOp>();
+      rewriter.setInsertionPointToStart(moduleOp.getBody());
+
+      auto arrayAttr = DenseElementsAttr::get(
+          RankedTensorType::get({totalThreads}, elementType),
+          rewriter.getZeroAttr(elementType));
+
+      globalMemOp = rewriter.create<LLVM::GlobalOp>(
+          UnknownLoc::get(context), globalType,
+          /*isConstant=*/false, LLVM::Linkage::Internal,
+          "global_reduce_buffer_" + std::to_string(global_reduce_buffer_id++),
+          arrayAttr);
     }
 
-    // Compute a shared memory base per operand.
-    auto smemShape = helper.getScratchRepShape();
+    Type globalPtrType =
+        LLVM::LLVMPointerType::get(context, globalMemOp.getAddrSpace());
+    Value globalMem = rewriter.create<LLVM::AddressOfOp>(
+        UnknownLoc::get(context), globalPtrType, globalMemOp.getSymName());
 
-    SmallVector<Value> smemBases =
-        getSmemBases(op, product<unsigned>(smemShape), rewriter);
-
-    storeWarpReduceToSharedMemory(helper, accs, indices, smemBases, rewriter);
+    storeThreadResultsToGlobal(helper, accs, globalMem, rewriter);
 
     sync(rewriter, loc, op);
 
-    // The second round of shuffle reduction
-    //   now the problem size: sizeInterWarps, s1, s2, .. , sn
-    //   where sizeInterWarps is 2^m
-    //
-    // Each thread needs to process:
-    //   elemsPerThread = sizeInterWarps * s1 * s2 .. Sn / numThreads
-    accumulatePartialReductions(helper, smemBases, rewriter);
+    performReductionFromGlobal(helper, globalMem, accs, rewriter);
 
-    // We could avoid this barrier in some of the layouts, however this is not
-    // the general case.
-    // TODO: optimize the barrier in case the layouts are accepted.
-    sync(rewriter, loc, op);
-
-    // set output values
-    loadReductionAndPackResult(helper, smemShape, smemBases, rewriter);
+    packResults(helper, accs, rewriter);
 
     return success();
   }
 
 private:
   const TargetInfoBase &targetInfo;
+  static int global_reduce_buffer_id;
 
   void accumulate(ConversionPatternRewriter &rewriter, Region &combineOp,
                   SmallVector<Value> &acc, ValueRange cur, bool isFirst) const {
@@ -426,7 +430,66 @@ private:
     }
     rewriter.replaceOp(op, results);
   }
+
+  void storeThreadResultsToGlobal(
+      ReduceOpHelper &helper,
+      std::map<SmallVector<unsigned>, SmallVector<Value>> &accs,
+      Value globalMem, ConversionPatternRewriter &rewriter) const {
+    triton::ReduceOp op = helper.getOperation();
+    Location loc = op.getLoc();
+    Value threadId = getThreadId(rewriter, loc);
+
+    for (auto &[key, acc] : accs) {
+      for (unsigned i = 0; i < acc.size(); ++i) {
+        Value writeOffset = rewriter.create<LLVM::AddOp>(
+            loc, threadId,
+            rewriter.create<LLVM::ConstantOp>(
+                loc, rewriter.getI32Type(),
+                rewriter.getIntegerAttr(rewriter.getI32Type(), i)));
+        Value writePtr = gep(ptr_ty(rewriter.getContext(), 1), acc[i].getType(),
+                             globalMem, writeOffset);
+
+        rewriter.create<LLVM::StoreOp>(loc, acc[i], writePtr);
+      }
+    }
+  }
+
+  void performReductionFromGlobal(
+      ReduceOpHelper &helper, Value globalMem,
+      std::map<SmallVector<unsigned>, SmallVector<Value>> &accs,
+      ConversionPatternRewriter &rewriter) const {
+    triton::ReduceOp op = helper.getOperation();
+    Type elementType = op.getInputTypes()[0].getElementType();
+    Location loc = op.getLoc();
+    Value threadId = getThreadId(rewriter, loc);
+    auto srcShape = helper.getSrcShape();
+    llvm::SmallVector<unsigned, 4> convertedShape(srcShape.begin(),
+                                                  srcShape.end());
+    unsigned totalThreads = product<unsigned>(convertedShape);
+    auto combineOp = &op.getCombineOp();
+
+    for (auto &[key, acc] : accs) {
+      for (unsigned i = 0; i < acc.size(); ++i) {
+        // Each thread initializes its local reduction value
+        Value localResult = acc[i];
+
+        // Loop over all values in global memory for reduction
+        for (unsigned j = 0; j < totalThreads; ++j) {
+          Value readOffset = rewriter.create<LLVM::ConstantOp>(
+              loc, rewriter.getI32Type(),
+              rewriter.getIntegerAttr(rewriter.getI32Type(), j));
+          Value readPtr = gep(ptr_ty(rewriter.getContext(), 1),
+                              acc[i].getType(), globalMem, readOffset);
+          Value readVal = load(elementType, readPtr);
+
+          SmallVector<Value> cur = {readVal};
+          accumulate(rewriter, *combineOp, acc, cur, /*isFirst=*/false);
+        }
+      }
+    }
+  }
 };
+int ReduceOpConversion::global_reduce_buffer_id = 0;
 } // namespace
 
 void mlir::triton::populateReduceOpToLLVMPatterns(
