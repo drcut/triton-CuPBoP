@@ -23,7 +23,6 @@ public:
       : ConvertTritonGPUReduceScanToLLVMPattern<triton::ReduceOp>(typeConverter,
                                                                   benefit),
         targetInfo(targetInfo) {}
-
   LogicalResult
   matchAndRewrite(triton::ReduceOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
@@ -39,15 +38,21 @@ public:
     // First reduce all the values along axis within each thread.
     reduceWithinThreads(helper, srcValues, accs, indices, rewriter);
 
-    // // Create global memory buffer for reduction
-    unsigned totalThreads = std::accumulate(helper.getSrcShape().begin(),
-                                            helper.getSrcShape().end(), 1,
-                                            std::multiplies<unsigned>());
-    Type elementType = op.getInputTypes()[0].getElementType();
+    // TODO: We current assume the block size is smaller than the reduction
+    // array. We need to handle the case where the block size is larger than the
+    // reduction array.
 
-    auto globalType = LLVM::LLVMArrayType::get(elementType, totalThreads);
-    LLVM::GlobalOp globalMemOp;
+    // Create shared memory buffer for reduction The reduction
+    // process contains two steps: 1: each thread writes its result to shared
+    // memory 2: all threads read the shared memory and perform reduction in
+    // parallel
+    LLVM::GlobalOp sharedMemOp;
     {
+      unsigned totalThreads = std::accumulate(helper.getSrcShape().begin(),
+                                              helper.getSrcShape().end(), 1,
+                                              std::multiplies<unsigned>());
+      Type elementType = op.getInputTypes()[0].getElementType();
+      auto arrayType = LLVM::LLVMArrayType::get(elementType, totalThreads);
       RewriterBase::InsertionGuard guard(rewriter);
       auto moduleOp =
           rewriter.getBlock()->getParent()->getParentOfType<ModuleOp>();
@@ -57,23 +62,24 @@ public:
           RankedTensorType::get({totalThreads}, elementType),
           rewriter.getZeroAttr(elementType));
 
-      globalMemOp = rewriter.create<LLVM::GlobalOp>(
-          UnknownLoc::get(context), globalType,
+      sharedMemOp = rewriter.create<LLVM::GlobalOp>(
+          UnknownLoc::get(context), arrayType,
           /*isConstant=*/false, LLVM::Linkage::Internal,
           "global_reduce_buffer_" + std::to_string(global_reduce_buffer_id++),
-          arrayAttr);
+          arrayAttr, /*alignment=*/16,
+          static_cast<unsigned>(NVVM::NVVMMemorySpace::kSharedMemorySpace));
     }
 
-    Type globalPtrType =
-        LLVM::LLVMPointerType::get(context, globalMemOp.getAddrSpace());
-    Value globalMem = rewriter.create<LLVM::AddressOfOp>(
-        UnknownLoc::get(context), globalPtrType, globalMemOp.getSymName());
+    Type sharedPtrType =
+        LLVM::LLVMPointerType::get(context, sharedMemOp.getAddrSpace());
+    Value sharedMem = rewriter.create<LLVM::AddressOfOp>(
+        UnknownLoc::get(context), sharedPtrType, sharedMemOp.getSymName());
 
-    storeThreadResultsToGlobal(helper, accs, globalMem, rewriter);
+    storeThreadResultsToShared(helper, accs, sharedMem, rewriter);
 
     sync(rewriter, loc, op);
 
-    performReductionFromGlobal(helper, globalMem, accs, rewriter);
+    performReductionFromShared(helper, sharedMem, accs, rewriter);
 
     packResults(helper, accs, rewriter);
 
@@ -248,8 +254,8 @@ private:
     SmallVector<Value> multiDimWarpId;
 
     // 2x2 warps with slice dim = 0, warpId = 2 ends up writing at the same
-    // address as warpId = 0 since the warpsPerCTA is [1, 2], need to figure out
-    // a way to properly delinearize warpId in the slice case
+    // address as warpId = 0 since the warpsPerCTA is [1, 2], need to figure
+    // out a way to properly delinearize warpId in the slice case
     if (auto sliceLayout = mlir::dyn_cast<SliceEncodingAttr>(srcLayout)) {
       auto parentLayout = sliceLayout.getParent();
       auto parentWarpsPerCTA = triton::gpu::getWarpsPerCTA(parentLayout);
@@ -431,10 +437,10 @@ private:
     rewriter.replaceOp(op, results);
   }
 
-  void storeThreadResultsToGlobal(
+  void storeThreadResultsToShared(
       ReduceOpHelper &helper,
       std::map<SmallVector<unsigned>, SmallVector<Value>> &accs,
-      Value globalMem, ConversionPatternRewriter &rewriter) const {
+      Value sharedMem, ConversionPatternRewriter &rewriter) const {
     triton::ReduceOp op = helper.getOperation();
     Location loc = op.getLoc();
     Value threadId = getThreadId(rewriter, loc);
@@ -447,15 +453,15 @@ private:
                 loc, rewriter.getI32Type(),
                 rewriter.getIntegerAttr(rewriter.getI32Type(), i)));
         Value writePtr = gep(ptr_ty(rewriter.getContext(), 1), acc[i].getType(),
-                             globalMem, writeOffset);
+                             sharedMem, writeOffset);
 
         rewriter.create<LLVM::StoreOp>(loc, acc[i], writePtr);
       }
     }
   }
 
-  void performReductionFromGlobal(
-      ReduceOpHelper &helper, Value globalMem,
+  void performReductionFromShared(
+      ReduceOpHelper &helper, Value sharedMem,
       std::map<SmallVector<unsigned>, SmallVector<Value>> &accs,
       ConversionPatternRewriter &rewriter) const {
     triton::ReduceOp op = helper.getOperation();
@@ -479,11 +485,12 @@ private:
               loc, rewriter.getI32Type(),
               rewriter.getIntegerAttr(rewriter.getI32Type(), j));
           Value readPtr = gep(ptr_ty(rewriter.getContext(), 1),
-                              acc[i].getType(), globalMem, readOffset);
+                              acc[i].getType(), sharedMem, readOffset);
           Value readVal = load(elementType, readPtr);
 
           SmallVector<Value> cur = {readVal};
-          accumulate(rewriter, *combineOp, acc, cur, /*isFirst=*/false);
+          bool isFirst = j == 0;
+          accumulate(rewriter, *combineOp, acc, cur, isFirst);
         }
       }
     }
