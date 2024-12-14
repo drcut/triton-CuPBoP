@@ -38,24 +38,23 @@ public:
     // First reduce all the values along axis within each thread.
     reduceWithinThreads(helper, srcValues, accs, indices, rewriter);
 
-    // TODO: We current assume the block size is smaller than the reduction
-    // array. We need to handle the case where the block size is larger than the
-    // reduction array.
-
     // Create shared memory buffer for reduction The reduction
     // process contains two steps: 1: each thread writes its result to shared
     // memory 2: all threads read the shared memory and perform reduction in
     // parallel
     LLVM::GlobalOp sharedMemOp;
     {
-      unsigned totalThreads = std::accumulate(helper.getSrcShape().begin(),
-                                              helper.getSrcShape().end(), 1,
-                                              std::multiplies<unsigned>());
-      Type elementType = op.getInputTypes()[0].getElementType();
-      auto arrayType = LLVM::LLVMArrayType::get(elementType, totalThreads);
       RewriterBase::InsertionGuard guard(rewriter);
       auto moduleOp =
           rewriter.getBlock()->getParent()->getParentOfType<ModuleOp>();
+      int threadsPerWarp =
+          triton::gpu::TritonGPUDialect::getThreadsPerWarp(moduleOp);
+      SmallVector<unsigned> warpsPerCTA =
+          triton::gpu::getWarpsPerCTA(helper.getSrcLayout());
+      int warpsPerBlock = product(warpsPerCTA);
+      unsigned totalThreads = threadsPerWarp * warpsPerBlock;
+      Type elementType = op.getInputTypes()[0].getElementType();
+      auto arrayType = LLVM::LLVMArrayType::get(elementType, totalThreads);
       rewriter.setInsertionPointToStart(moduleOp.getBody());
 
       auto arrayAttr = DenseElementsAttr::get(
@@ -468,10 +467,14 @@ private:
     Type elementType = op.getInputTypes()[0].getElementType();
     Location loc = op.getLoc();
     Value threadId = getThreadId(rewriter, loc);
-    auto srcShape = helper.getSrcShape();
-    llvm::SmallVector<unsigned, 4> convertedShape(srcShape.begin(),
-                                                  srcShape.end());
-    unsigned totalThreads = product<unsigned>(convertedShape);
+    auto moduleOp =
+        rewriter.getBlock()->getParent()->getParentOfType<ModuleOp>();
+    int threadsPerWarp =
+        triton::gpu::TritonGPUDialect::getThreadsPerWarp(moduleOp);
+    SmallVector<unsigned> warpsPerCTA =
+        triton::gpu::getWarpsPerCTA(helper.getSrcLayout());
+    int warpsPerBlock = product(warpsPerCTA);
+    unsigned totalThreads = threadsPerWarp * warpsPerBlock;
     auto combineOp = &op.getCombineOp();
 
     for (auto &[key, acc] : accs) {

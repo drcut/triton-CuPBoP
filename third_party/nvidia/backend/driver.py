@@ -473,7 +473,7 @@ def make_launcher_CuPBoP(constants, signature, ids):
     # block_id_x, block_id_y, block_id_z
     CuPBoP_suffix = ", int, int, int, int, int, int, int, int, int, int"
     CuPBoP_wrapper_arg_types = ', '.join(
-        f"{ty_to_cpp(ty)}" for _, ty in signature.items()) + CuPBoP_suffix
+        f"{ty_to_cpp(ty)}" for key, ty in signature.items() if key not in constants) + CuPBoP_suffix
 
     def _extracted_type(ty):
         if ty[0] == '*':
