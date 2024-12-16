@@ -471,7 +471,7 @@ def make_launcher_CuPBoP(constants, signature, ids):
     # CuPBoP wrapper argument types: original function types,
     # block size, block_x, block_y, block_z, grid_x, grid_y, grid_z,
     # block_id_x, block_id_y, block_id_z
-    CuPBoP_suffix = ", int, int, int, int, int, int, int, int, int, int"
+    CuPBoP_suffix = ", int, int, int, int, int, int, int, int, int, int, void*"
     CuPBoP_wrapper_arg_types = ', '.join(
         f"{ty_to_cpp(ty)}" for key, ty in signature.items() if key not in constants) + CuPBoP_suffix
 
@@ -529,12 +529,16 @@ static void _launch(int gridX, int gridY, int gridZ, int num_warps, int num_ctas
   printf("gridX: %d, gridY: %d, gridZ: %d, num_warps: %d, num_ctas: %d, clusterDimX: %d, clusterDimY: %d, clusterDimZ: %d, shared_memory: %d\\n", gridX, gridY, gridZ, num_warps, num_ctas, clusterDimX, clusterDimY, clusterDimZ, shared_memory);
   if (gridX*gridY*gridZ > 0) {{
     int block_size = 32 * num_warps;
+    void* dynamic_shared_mem = (void*)malloc(shared_memory*gridX*gridY*gridZ);
     for(int block_idx_x = 0; block_idx_x < gridX; block_idx_x++)
     for(int block_idx_y = 0; block_idx_y < gridY; block_idx_y++)
     for(int block_idx_z = 0; block_idx_z < gridZ; block_idx_z++)
     {{
-      function({', '.join(f"arg{i}" for i in params) if len(params) > 0 else ''}, block_size, block_size, 1, 1, gridX, gridY, gridZ, block_idx_x, block_idx_y, block_idx_z);
+      int block_id = block_idx_x + block_idx_y*gridX + block_idx_z*gridX*gridY;
+      char* dynamic_shared_mem_ptr = dynamic_shared_mem + block_id*shared_memory;
+      function({', '.join(f"arg{i}" for i in params) if len(params) > 0 else ''}, block_size, block_size, 1, 1, gridX, gridY, gridZ, block_idx_x, block_idx_y, block_idx_z, dynamic_shared_mem_ptr);
     }}
+    free(dynamic_shared_mem);
   }}
 }}
 

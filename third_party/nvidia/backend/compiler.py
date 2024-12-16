@@ -492,14 +492,14 @@ class CUDACuPBoPBackend(BaseBackend):
         nvidia.passes.ttnvgpuir.add_plan_cta(pm, cluster_info)
         passes.ttgpuir.add_remove_layout_conversions(pm)
         passes.ttgpuir.add_optimize_thread_locality(pm)
-        passes.ttgpuir.add_accelerate_matmul(pm)
+        # passes.ttgpuir.add_accelerate_matmul(pm)
         passes.ttgpuir.add_remove_layout_conversions(pm)
         passes.ttgpuir.add_optimize_dot_operands(pm, capability >= 80)
         passes.common.add_cse(pm)
         if capability // 10 >= 8:
             passes.ttgpuir.add_optimize_accumulator_init(pm)
             passes.ttgpuir.add_combine_tensor_select_and_if(pm)
-            passes.ttgpuir.add_pipeline(pm, opt.num_stages)
+            # passes.ttgpuir.add_pipeline(pm, opt.num_stages)
         passes.ttgpuir.add_prefetch(pm)
         passes.ttgpuir.add_optimize_dot_operands(pm, capability >= 80)
         passes.ttgpuir.add_remove_layout_conversions(pm)
@@ -634,9 +634,11 @@ class CUDACuPBoPBackend(BaseBackend):
 
             shared_library = ["-shared", "-fPIC"]
             opt_level = ["-O3"]
+            runtime_library = [
+                "-L/nethome/rhan38/USERSCRATCH/triton_study/CuPBoP/build/runtime", "-lCPUruntime"]
             clang_cmd = [
                 "clang", *shared_library, '-v', *
-                opt_level, fsrc.name, '-o', fbin
+                opt_level, fsrc.name, *runtime_library, '-o', fbin
             ]
             try:
                 subprocess.run(clang_cmd, check=True,
