@@ -381,27 +381,21 @@ void TargetInfo::storeDShared(RewriterBase &rewriter, Location loc, Value ptr,
     ptr = mapa(rewriter, loc, ptr, *ctaId, pred);
   }
 
-  PTXBuilder builder;
-  auto st = builder.create<>("st")
-                ->o("shared::cta", ctaId.has_value())
-                .o("shared", !ctaId.has_value())
-                .v(vec, /*predicate=*/vec > 1)
-                .b(elemBitwidth);
-  auto *ptrOpr = builder.newAddrOperand(ptr, "r");
-
-  PTXBuilder::Operand *valOpr;
-  std::string constraint = getConstraintForBitwidth(elemBitwidth);
   if (vec > 1) {
-    SmallVector<std::pair<Value, std::string>> vecVals;
-    for (int i = 0; i < vec; i++) {
-      vecVals.push_back({extract_element(val, i32_val(i)), constraint});
+    for (unsigned i = 0; i < vec; ++i) {
+      Value elem = extract_element(val, i32_val(i));
+      Value elemPtr = gep(ptr.getType(), elemTy, ptr, i32_val(i));
+      rewriter.create<scf::IfOp>(loc, pred, [&](OpBuilder &b, Location loc) {
+        b.create<LLVM::StoreOp>(loc, elem, elemPtr);
+        b.create<scf::YieldOp>(loc);
+      });
     }
-    valOpr = builder.newListOperand(vecVals);
   } else {
-    valOpr = builder.newOperand(val, constraint);
+    rewriter.create<scf::IfOp>(loc, pred, [&](OpBuilder &b, Location loc) {
+      b.create<LLVM::StoreOp>(loc, val, ptr);
+      b.create<scf::YieldOp>(loc);
+    });
   }
-  st(ptrOpr, valOpr).predicate(pred, "b");
-  builder.launch(rewriter, loc, void_ty(ctx));
 }
 
 Value TargetInfo::loadDShared(RewriterBase &rewriter, Location loc, Value ptr,
