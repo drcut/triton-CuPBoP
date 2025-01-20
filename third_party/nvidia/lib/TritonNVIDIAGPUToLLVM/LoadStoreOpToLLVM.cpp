@@ -289,16 +289,16 @@ struct LoadOpConversion : public ConvertOpToLLVMPattern<triton::LoadOp>,
         falseVal = v;
       }
 
-      // auto loadVal = rewriter.create<LLVM::LoadOp>(loc, vecTy,
-      // ptr).getResult(); if (pred) {
-      //   loadVal = rewriter.create<LLVM::SelectOp>(loc, pred, loadVal,
-      //   falseVal)
-      //                 .getResult();
-      // }
-      Value loadVal = rewriter.create<LLVM::MaskedLoadOp>(
-          loc, vecTy, ptr, pred, falseVal,
-          rewriter.getI32IntegerAttr(getMaskAlignment(mask)),
-          nullptr /* nontemporal */);
+      Value loadVal;
+      if(mask) {
+        loadVal = rewriter.create<LLVM::MaskedLoadOp>(
+            loc, vecTy, ptr, pred, falseVal,
+            rewriter.getI32IntegerAttr(getMaskAlignment(mask)),
+            nullptr /* nontemporal */);
+      } else {
+        loadVal = rewriter.create<LLVM::LoadOp>(loc, vecTy, ptr,
+                                                /*isVolatile=*/false);
+      }
 
       for (size_t ii = 0; ii < vec; ++ii) {
         Value vecIdx = createIndexAttrConstant(
@@ -398,11 +398,13 @@ struct StoreOpConversion : public ConvertOpToLLVMPattern<triton::StoreOp>,
             rewriter, loc, this->getTypeConverter()->getIndexType(), s);
         storeVal = insert_element(vecTy, storeVal, otherElem, indexVal);
       }
-      // ::mlir::LLVM::StoreOp(rewriter, loc, ptr, storeVal, pred, cacheMod);
-      // rewriter.create<::mlir::LLVM::StoreOp>(loc, storeVal, ptr);
-      rewriter.create<LLVM::MaskedStoreOp>(
-          loc, storeVal, ptr, pred,
-          rewriter.getI32IntegerAttr(getMaskAlignment(mask)));
+      if (mask) {
+        rewriter.create<LLVM::MaskedStoreOp>(
+            loc, storeVal, ptr, pred,
+            rewriter.getI32IntegerAttr(getMaskAlignment(mask)));
+      } else {
+        rewriter.create<LLVM::StoreOp>(loc, storeVal, ptr);
+      }
     } // end vec
     rewriter.eraseOp(op);
     return success();
