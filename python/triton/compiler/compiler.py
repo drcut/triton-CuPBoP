@@ -241,6 +241,8 @@ def filter_traceback(e: BaseException):
 def compile(src, target=None, options=None):
     if target is None:
         target = driver.active.get_current_target()
+    if target.backend == 'cpu':
+        target = driver.active.get_current_target()
     assert isinstance(target, GPUTarget), "target must be of GPUTarget type"
     backend = make_backend(target)
     ir_source = not isinstance(src, ASTSource)
@@ -413,10 +415,11 @@ class CompiledKernel:
             self.module, self.function, self.n_regs, self.n_spills = driver.active.utils.load_binary(
                 self.name, self.kernel, self.metadata.shared, device)
         else:
-            print("self.metadata.obj_path", self.metadata.obj_path)
-            print("self.name", self.name)
             self.handler, self.function = driver.active.utils.load_binary_cupbop(
                 self.metadata.obj_path, self.name)
+            # TODO: CuPBoP backend does not support calculate register related information
+            self.n_regs = 0
+            self.n_spills = 0
 
     def __getattribute__(self, name):
         if name == 'run':
