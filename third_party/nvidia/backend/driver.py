@@ -523,13 +523,13 @@ def make_launcher_CuPBoP(constants, signature, ids):
 #include <Python.h>
 #include <dlfcn.h>
 #include <stdio.h>
+#include <omp.h>
 
 static void _launch(int gridX, int gridY, int gridZ, int num_warps, int num_ctas, int clusterDimX, int clusterDimY, int clusterDimZ, int shared_memory, void (* function)({CuPBoP_wrapper_arg_types}){', ' + arg_decls if len(arg_decls) > 0 else ''}) {{
-  // void *params[] = {{ {', '.join(f"&arg{i}" for i in params)} }};
-  printf("gridX: %d, gridY: %d, gridZ: %d, num_warps: %d, num_ctas: %d, clusterDimX: %d, clusterDimY: %d, clusterDimZ: %d, shared_memory: %d\\n", gridX, gridY, gridZ, num_warps, num_ctas, clusterDimX, clusterDimY, clusterDimZ, shared_memory);
   if (gridX*gridY*gridZ > 0) {{
     int block_size = 32 * num_warps;
     void* dynamic_shared_mem = (void*)malloc(shared_memory*gridX*gridY*gridZ);
+    #pragma omp parallel for collapse(3)
     for(int block_idx_x = 0; block_idx_x < gridX; block_idx_x++)
     for(int block_idx_y = 0; block_idx_y < gridY; block_idx_y++)
     for(int block_idx_z = 0; block_idx_z < gridZ; block_idx_z++)
@@ -571,7 +571,6 @@ static inline void* getPointer(PyObject *obj, int idx) {{
 }}
 
 static PyObject* launch(PyObject* self, PyObject* args) {{
-  printf("launching\\n");
   int gridX, gridY, gridZ;
   uint64_t _stream;
   uint64_t _function;
@@ -580,13 +579,11 @@ static PyObject* launch(PyObject* self, PyObject* args) {{
   PyObject *kernel_metadata = NULL;
   PyObject *launch_metadata = NULL;
   {' '.join([f"{_extracted_type(ty)} _arg{i}; " for i, ty in signature.items()])}
-  printf("parsing args\\n");
   if(!PyArg_ParseTuple(args, \"{format}\", &gridX, &gridY, &gridZ, &_stream, &_function,
                                            &kernel_metadata, &launch_metadata,
                                            &launch_enter_hook, &launch_exit_hook {args_list})) {{
     return NULL;
   }}
-  printf("parsed metadata\\n");
   int num_warps, num_ctas, shared_memory, clusterDimX, clusterDimY, clusterDimZ;
   if (!PyArg_ParseTuple(kernel_metadata, \"iiiiii\", &num_warps, &num_ctas, &shared_memory, &clusterDimX, &clusterDimY, &clusterDimZ)) {{
     PyErr_SetString(PyExc_TypeError, "kernel_metadata must be a tuple");
@@ -595,7 +592,6 @@ static PyObject* launch(PyObject* self, PyObject* args) {{
 
   // extract launch metadata
   if (launch_enter_hook != Py_None){{
-    printf("calling enter hook\\n");
     PyObject* args = Py_BuildValue("(O)", launch_metadata);
     PyObject* ret = PyObject_CallObject(launch_enter_hook, args);
     Py_DECREF(args);
@@ -603,20 +599,16 @@ static PyObject* launch(PyObject* self, PyObject* args) {{
       return NULL;
   }}
 
-  printf("launching kernel\\n");
   // raise exception asap
   {"".join([f"void* ptr_info{i} = getPointer(_arg{i}, {i}); if (!ptr_info{i}) return NULL;" if ty[0] == "*" else "" for i, ty in signature.items()])};
   Py_BEGIN_ALLOW_THREADS;
-  printf("before launching kernel\\n");
   _launch(gridX, gridY, gridZ, num_warps, num_ctas, clusterDimX, clusterDimY, clusterDimZ, shared_memory, (void*)_function{', ' + ', '.join(internal_args_list) if len(internal_args_list) > 0 else ''});
   Py_END_ALLOW_THREADS;
-  printf("Kernel launch complete\\n");
   if (PyErr_Occurred()) {{
     return NULL;
   }}
 
   if(launch_exit_hook != Py_None){{
-    printf("calling exit hook\\n");
     PyObject* args = Py_BuildValue("(O)", launch_metadata);
     PyObject* ret = PyObject_CallObject(launch_exit_hook, args);
     Py_DECREF(args);
