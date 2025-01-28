@@ -38,12 +38,13 @@ public:
     // First reduce all the values along axis within each thread.
     reduceWithinThreads(helper, srcValues, accs, indices, rewriter);
 
-    // Create shared memory buffer for reduction The reduction
+    // Create shared memory buffer for reduction. The reduction
     // process contains two steps: 1: each thread writes its result to shared
     // memory 2: all threads read the shared memory and perform reduction in
     // parallel
     LLVM::GlobalOp sharedMemOp;
     {
+      // Initialize shared memory buffer
       RewriterBase::InsertionGuard guard(rewriter);
       auto moduleOp =
           rewriter.getBlock()->getParent()->getParentOfType<ModuleOp>();
@@ -54,11 +55,13 @@ public:
       int warpsPerBlock = product(warpsPerCTA);
       unsigned totalThreads = threadsPerWarp * warpsPerBlock;
       Type elementType = op.getInputTypes()[0].getElementType();
-      auto arrayType = LLVM::LLVMArrayType::get(elementType, totalThreads);
+      // TODO: Currently only support reduce when all inputs are the same type
+      unsigned numReducedVal = op.getInputTypes().size();
+      auto arrayType = LLVM::LLVMArrayType::get(elementType, totalThreads * numReducedVal);
       rewriter.setInsertionPointToStart(moduleOp.getBody());
 
       auto arrayAttr = DenseElementsAttr::get(
-          RankedTensorType::get({totalThreads}, elementType),
+          RankedTensorType::get({totalThreads * numReducedVal}, elementType),
           rewriter.getZeroAttr(elementType));
 
       sharedMemOp = rewriter.create<LLVM::GlobalOp>(
@@ -73,11 +76,9 @@ public:
         LLVM::LLVMPointerType::get(context, sharedMemOp.getAddrSpace());
     Value sharedMem = rewriter.create<LLVM::AddressOfOp>(
         UnknownLoc::get(context), sharedPtrType, sharedMemOp.getSymName());
-
     storeThreadResultsToShared(helper, accs, sharedMem, rewriter);
 
     sync(rewriter, loc, op);
-
     performReductionFromShared(helper, sharedMem, accs, rewriter);
 
     packResults(helper, accs, rewriter);
@@ -446,14 +447,10 @@ private:
 
     for (auto &[key, acc] : accs) {
       for (unsigned i = 0; i < acc.size(); ++i) {
-        Value writeOffset = rewriter.create<LLVM::AddOp>(
-            loc, threadId,
-            rewriter.create<LLVM::ConstantOp>(
-                loc, rewriter.getI32Type(),
-                rewriter.getIntegerAttr(rewriter.getI32Type(), i)));
+        // Write offset = threadId * sizeof(acc) + i
+        Value writeOffset = add(mul(threadId, i32_val(acc.size())), i32_val(i));
         Value writePtr = gep(ptr_ty(rewriter.getContext(), 1), acc[i].getType(),
                              sharedMem, writeOffset);
-
         rewriter.create<LLVM::StoreOp>(loc, acc[i], writePtr);
       }
     }
@@ -478,23 +475,19 @@ private:
     auto combineOp = &op.getCombineOp();
 
     for (auto &[key, acc] : accs) {
-      for (unsigned i = 0; i < acc.size(); ++i) {
-        // Each thread initializes its local reduction value
-        Value localResult = acc[i];
-
-        // Loop over all values in global memory for reduction
-        for (unsigned j = 0; j < totalThreads; ++j) {
-          Value readOffset = rewriter.create<LLVM::ConstantOp>(
-              loc, rewriter.getI32Type(),
-              rewriter.getIntegerAttr(rewriter.getI32Type(), j));
-          Value readPtr = gep(ptr_ty(rewriter.getContext(), 1),
+      for (unsigned j = 0; j < totalThreads; ++j) {
+        SmallVector<Value> cur;
+        // Loop over all values in shared memory for reduction
+        for (unsigned i = 0; i < acc.size(); ++i) {
+          Value readOffset = add(mul(i32_val(acc.size()), i32_val(j)),
+                                 i32_val(i));
+          Value readPtr = gep(ptr_ty(rewriter.getContext(), 3),
                               acc[i].getType(), sharedMem, readOffset);
-          Value readVal = load(elementType, readPtr);
-
-          SmallVector<Value> cur = {readVal};
-          bool isFirst = j == 0;
-          accumulate(rewriter, *combineOp, acc, cur, isFirst);
+          Value readVal = load(acc[i].getType(), readPtr);
+          cur.push_back(readVal);
         }
+        bool isFirst = j == 0;
+        accumulate(rewriter, *combineOp, acc, cur, isFirst);
       }
     }
   }

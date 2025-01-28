@@ -663,9 +663,7 @@ class CuPBoPLauncher(object):
         self.launch = mod.launch
 
     def __call__(self, *args, **kwargs):
-        print("before call")
         self.launch(*args, **kwargs)
-        print("after call")
 
 
 class CuPBoPDriver(GPUDriver):
